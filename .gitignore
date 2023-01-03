@@ -1,2 +1,3 @@
-*.txt*
-/pthread
+*.txt
+*.txtA
+pthread/
