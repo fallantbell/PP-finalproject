@@ -3,8 +3,7 @@
 #include <string.h>
 #include "../common/CycleTimer.h"
 
-#define MIN_MACRO(a,b) ( (a) < (b) ? (a) : (b) )
-#define block_dim 32
+#define block_dim 16
 
 void input(int *node_ptr,int *edge_ptr,float **matrix){
     scanf("%d",node_ptr);
@@ -52,173 +51,203 @@ void output(int n,float *matrix){
 }
 
 // kernel for pass 1
-__global__ void apsp_parallel_2_kernel_1(float* dev_dist, int N, int stage) {
+__global__ void kernel_1(int N, int stage,float* matrix) {
 
-	// get indices for the current cell
-	int i = stage*block_dim + threadIdx.y;
-	int j = stage*block_dim + threadIdx.x;
+    int i,j,tid;
 
-	int tid = i*N + j;
+	i = stage*block_dim + threadIdx.y;
+	j = stage*block_dim + threadIdx.x;
+	tid = i*N + j;
 
 	// allocate shared memory
-	__shared__ float sd[block_dim][block_dim];
+	__shared__ float shared_block[block_dim][block_dim];
     
     // if(i<N && j<N){
-        // copy data from main memory to shared memory
-        sd[threadIdx.y][threadIdx.x] = dev_dist[tid];
+        // to shared memory
+        shared_block[threadIdx.y][threadIdx.x] = matrix[tid];
         __syncthreads();
+        float Dik;
+        float Dkj;
+        float Dij;
 
-        // iterate for the values of k
         for (int k = 0; k < block_dim; k++) {
 
-            float vertex   = sd[threadIdx.y][threadIdx.x];
-            float alt_path = sd[k][threadIdx.x] + sd[threadIdx.y][k];
+            Dik = shared_block[threadIdx.y][k];
+            Dkj = shared_block[k][threadIdx.x];
+            Dij = shared_block[threadIdx.y][threadIdx.x];
+            if(Dik+Dkj<Dij){
+                shared_block[threadIdx.y][threadIdx.x] = Dik+Dkj;
+            }
 
-            sd[threadIdx.y][threadIdx.x] = MIN_MACRO( vertex, alt_path );
             __syncthreads();
 
         }
 
-        // write result back to main memory
-        dev_dist[tid] = sd[threadIdx.y][threadIdx.x];
+        // back to main memory
+        matrix[tid] = shared_block[threadIdx.y][threadIdx.x];
     // }
 
 	
 }
 
 // kernel for pass 2
-__global__ void apsp_parallel_2_kernel_2(float* dev_dist, int N, int stage) {
-	
-	// get indices of the current block
-	int skip_center_block = MIN_MACRO( (blockIdx.x+1)/(stage+1), 1 );
+__global__ void kernel_2(int N, int stage,float* matrix) {
+    
+    int box_x,box_y;
+    int i,j,tid,diagonal_i,diagonal_j,diagonal_tid;
 
-	int box_y = 0;
-	int box_x = 0;
+	int skip_num;
+    if((blockIdx.x+1)/(stage+1) < 1){
+        skip_num = (blockIdx.x+1)/(stage+1);
+    }
+    else{
+        skip_num = 1;
+    }
+    
+    box_y = 0;
+	box_x = 0;
 
-	// block in the same row with the primary block
 	if (blockIdx.y == 0) {
 		box_y = stage;
-		box_x = blockIdx.x + skip_center_block;
+		box_x = blockIdx.x + skip_num;
 	
 	}
-	// block in the same column with the primary block
 	else {
-		box_y = blockIdx.x + skip_center_block;
+		box_y = blockIdx.x + skip_num;
 		box_x = stage;
 	}
 
-	// get indices for the current cell
-	int i = box_y * block_dim + threadIdx.y;
-	int j = box_x * block_dim + threadIdx.x;
+	// current block
+	i = box_y * block_dim + threadIdx.y;
+	j = box_x * block_dim + threadIdx.x;
+    tid = i*N + j;
 
-	// get indices for the cell of the primary block
-	int pi = stage*block_dim + threadIdx.y;
-	int pj = stage*block_dim + threadIdx.x;
-
-	// get indices of the cells from the device main memory
-	int tid = i*N + j;
-	int ptid = pi*N + pj;
+	// diagonal block
+	diagonal_i = stage*block_dim + threadIdx.y;
+	diagonal_j = stage*block_dim + threadIdx.x;
+    diagonal_tid = diagonal_i*N + diagonal_j;
 
 	// allocate shared memory
-	__shared__ float sd[block_dim][2*block_dim];
+	__shared__ float shared_block[block_dim][2*block_dim];
 
-    // if(i < N && j < N && pi < N && pj < N){
-        // copy current block and primary block to shared memory
-        sd[threadIdx.y][threadIdx.x]             = dev_dist[tid]; // 當前的 block
-        sd[threadIdx.y][block_dim + threadIdx.x] = dev_dist[ptid]; // phase1 算出來的對角線 block
+    // if(i < N && j < N && diagonal_i < N && diagonal_j < N){
+        // to shared memory
+        shared_block[threadIdx.y][threadIdx.x]             = matrix[tid]; // current block
+        shared_block[threadIdx.y][block_dim + threadIdx.x] = matrix[diagonal_tid]; // diagonal block
         __syncthreads();
+        float Dik;
+        float Dkj;
+        float Dij;
 
-        // block in the same row with the primary block
+        // same row diagonal block
         if (blockIdx.y == 0) {
             for (int k = 0; k < block_dim; k++) {
-                // if(j+k >= N || pj+k >= N || i+k >= N || pi+k >=N){ 
+                // if(j+k >= N || diagonal_j+k >= N || i+k >= N || diagonal_i+k >=N){ 
                 //     break;
                 // }
 
-                float vertex   = sd[threadIdx.y][threadIdx.x];
-                float alt_path = sd[k][threadIdx.x] 
-                                                + sd[threadIdx.y][block_dim + k];
+                Dik = shared_block[threadIdx.y][block_dim + k];
+                Dkj = shared_block[k][threadIdx.x];
+                Dij = shared_block[threadIdx.y][threadIdx.x];
+                if(Dik+Dkj<Dij){
+                    shared_block[threadIdx.y][threadIdx.x] = Dik+Dkj;
+                }
 
-                sd[threadIdx.y][threadIdx.x] = MIN_MACRO( vertex, alt_path );
                 __syncthreads();
 
             }
         }
-        // block in the same column with the primary block
+        // same column diagonal block
         else {
             for (int k = 0; k < block_dim; k++) {
-                // if(j+k >= N || pj+k >= N || i+k >= N || pi+k >=N){ 
+                // if(j+k >= N || diagonal_j+k >= N || i+k >= N || diagonal_i+k >=N){ 
                 //     break;
                 // }
 
-                float vertex   = sd[threadIdx.y][threadIdx.x];
-                float alt_path = sd[threadIdx.y][k] 
-                                            + sd[k][block_dim + threadIdx.x];
+                Dik = shared_block[threadIdx.y][k];
+                Dkj = shared_block[k][block_dim + threadIdx.x];
+                Dij = shared_block[threadIdx.y][threadIdx.x];
+                if(Dik+Dkj<Dij){
+                    shared_block[threadIdx.y][threadIdx.x] = Dik+Dkj;
+                }
 
-                sd[threadIdx.y][threadIdx.x] = MIN_MACRO( vertex, alt_path );
                 __syncthreads();
             }
         }
 
-        // write result back to main memory
-        dev_dist[tid] = sd[threadIdx.y][threadIdx.x];
+        // back to main memory
+        matrix[tid] = shared_block[threadIdx.y][threadIdx.x];
     // }
 
 	
 }
 
 // kernel for pass 3
-__global__ void apsp_parallel_2_kernel_3(float* dev_dist, int N, int stage) {
+__global__ void kernel_3(int N, int stage,float* matrix) {
 
-	// get indices of the current block
-	int skip_center_block_y = MIN_MACRO( (blockIdx.y+1)/(stage+1), 1 );
-	int skip_center_block_x = MIN_MACRO( (blockIdx.x+1)/(stage+1), 1 );
+    int skip_num_x,skip_num_y;
+    int box_x,box_y;
+    int i,j,row_i,row_j,col_i,col_j,tid,row_tid,col_tid;
 
-	int box_y = blockIdx.y + skip_center_block_y;
-	int box_x = blockIdx.x + skip_center_block_x;
 
-	// get indices for the current cell
-	int i = box_y * block_dim + threadIdx.y;
-	int j = box_x * block_dim + threadIdx.x;
+    if((blockIdx.y+1)/(stage+1) < 1){
+        skip_num_y=(blockIdx.y+1)/(stage+1);
+    }
+    else{
+        skip_num_y=1;
+    }
 
-	// get indices from the cell in the same row with the current box
-	int ri = i;
-	int rj = stage*block_dim + threadIdx.x;
+    if((blockIdx.x+1)/(stage+1) < 1){
+        skip_num_x = (blockIdx.x+1)/(stage+1);
+    }
+    else{
+        skip_num_x=1;
+    }
+
+	box_y = blockIdx.y + skip_num_y;
+	box_x = blockIdx.x + skip_num_x;
+
+	// current block
+	i = box_y * block_dim + threadIdx.y;
+	j = box_x * block_dim + threadIdx.x;
+    tid =  i*N + j;
+
+	// same row block
+	row_i = i;
+	row_j = stage*block_dim + threadIdx.x;
+    row_tid = row_i*N + row_j;
 	
-	// get indices from the cell in the same column with the current box
-	int ci = stage*block_dim + threadIdx.y;
-	int cj = j;
-
-	// get indices of the cells from the device main memory
-	int  tid =  i*N +  j;
-	int rtid = ri*N + rj;
-	int ctid = ci*N + cj;
+	// same column block
+	col_i = stage*block_dim + threadIdx.y;
+	col_j = j;
+    col_tid = col_i*N + col_j;
 
 	// allocate shared memory
-	__shared__ float sd[block_dim][3*block_dim];
+	__shared__ float shared_block[block_dim][3*block_dim];
 
-    // if(i < N && j < N && ri < N && rj < N && ci < N && cj < N){
-        // copy current block and depending blocks to shared memory
-        sd[threadIdx.y][threadIdx.x]               = dev_dist[tid];
-        sd[threadIdx.y][  block_dim + threadIdx.x] = dev_dist[rtid]; 
-        sd[threadIdx.y][2*block_dim + threadIdx.x] = dev_dist[ctid]; 
+    // if(i < N && j < N && row_i < N && row_j < N && col_i < N && col_j < N){
+        // to shared memory
+        shared_block[threadIdx.y][threadIdx.x]               = matrix[tid];
+        shared_block[threadIdx.y][  block_dim + threadIdx.x] = matrix[row_tid]; 
+        shared_block[threadIdx.y][2*block_dim + threadIdx.x] = matrix[col_tid]; 
         __syncthreads();
 
+        float Dik;
+        float Dkj;
+        float Dij;
+
         for (int k = 0; k < block_dim; k++) {
-            // if(j+k >= N || rj+k >= N || i+k >= N || ri+k >=N || ci+k >= N || cj+k >=N ){ 
-            //     break;
-            // }
-
-            float vertex   = sd[threadIdx.y][threadIdx.x];
-            float alt_path = sd[threadIdx.y][block_dim + k]
-                                    + sd[k][2*block_dim + threadIdx.x];
-
-            sd[threadIdx.y][threadIdx.x] = MIN_MACRO( vertex, alt_path );
+            Dik = shared_block[threadIdx.y][block_dim + k];
+            Dkj = shared_block[k][2*block_dim + threadIdx.x];
+            Dij = shared_block[threadIdx.y][threadIdx.x];
+            if(Dik+Dkj<Dij){
+                shared_block[threadIdx.y][threadIdx.x] = Dik+Dkj;
+            }
             __syncthreads();
         }
 
-        // write result back to main memory
-        dev_dist[tid] = sd[threadIdx.y][threadIdx.x];
+        // back to main memory
+        matrix[tid] = shared_block[threadIdx.y][threadIdx.x];
     // }
 
 	
@@ -254,8 +283,8 @@ int main(int argc, char *argv[]){
 	cudaEventSynchronize(e_stop);
     cudaEventElapsedTime(&elapsedTime, e_start, e_stop);
     
-    // printf("\n\033[31m [malloc time]: \033[0m\t\t[%.3f] ms\n\n", elapsedTime);
-    printf("%.3f\n", elapsedTime);
+    printf("\n\033[31m [malloc time]: \033[0m\t\t[%.3f] ms\n\n", elapsedTime);
+    // printf("%.3f\n", elapsedTime);
     cudaEventRecord(e_start, 0);
         
     cudaMemcpy(matrix_gpu, matrix, sizeof(float) *node*node, cudaMemcpyHostToDevice);
@@ -263,8 +292,8 @@ int main(int argc, char *argv[]){
     cudaEventRecord(e_stop, 0);
 	cudaEventSynchronize(e_stop);
     cudaEventElapsedTime(&elapsedTime, e_start, e_stop);
-    // printf("\n\033[31m [mem2cuda time]: \033[0m\t\t[%.3f] ms\n\n", elapsedTime);
-    printf("%.3f\n", elapsedTime);
+    printf("\n\033[31m [mem2cuda time]: \033[0m\t\t[%.3f] ms\n\n", elapsedTime);
+    // printf("%.3f\n", elapsedTime);
     cudaEventRecord(e_start, 0);
 
     int nBlocks = node/block_dim;
@@ -275,34 +304,34 @@ int main(int argc, char *argv[]){
     for (int stage = 0; stage < nBlocks; stage++) {
 
         // pass 1 - launch kernel 1
-        apsp_parallel_2_kernel_1<<<blocks1,threads>>>(matrix_gpu,node,stage);
+        kernel_1<<<blocks1,threads>>>(node,stage,matrix_gpu);
 
         // pass 2 - launch kernel 2
-        apsp_parallel_2_kernel_2<<<blocks2,threads>>>(matrix_gpu,node,stage);
+        kernel_2<<<blocks2,threads>>>(node,stage,matrix_gpu);
 
         // pass 3 - launch kernel 3
-        apsp_parallel_2_kernel_3<<<blocks3,threads>>>(matrix_gpu,node,stage);
+        kernel_3<<<blocks3,threads>>>(node,stage,matrix_gpu);
     }
     cudaEventRecord(e_stop, 0);
 	cudaEventSynchronize(e_stop);
     cudaEventElapsedTime(&elapsedTime, e_start, e_stop);
     
-    // printf("\n\033[31m [execution time]: \033[0m\t\t[%.3f] ms\n\n", elapsedTime);
-    printf("%.3f\n", elapsedTime);
+    printf("\n\033[31m [execution time]: \033[0m\t\t[%.3f] ms\n\n", elapsedTime);
+    // printf("%.3f\n", elapsedTime);
     cudaEventRecord(e_start, 0);
     cudaMemcpy(matrix, matrix_gpu , sizeof(float) *node*node, cudaMemcpyDeviceToHost);
 
     cudaEventRecord(e_stop, 0);
 	cudaEventSynchronize(e_stop);
     cudaEventElapsedTime(&elapsedTime, e_start, e_stop);
-    // printf("\n\033[31m [cuda2mem time]: \033[0m\t\t[%.3f] ms\n\n", elapsedTime);
-    printf("%.3f\n", elapsedTime);
+    printf("\n\033[31m [cuda2mem time]: \033[0m\t\t[%.3f] ms\n\n", elapsedTime);
+    // printf("%.3f\n", elapsedTime);
 
 
     T_E = currentSeconds();
-    // printf("\n\033[31m [Total time]: \033[0m\t\t[%.3f] ms\n\n", (T_E-T_S) * 1000);
-    printf("%.3f\n", (T_E-T_S) * 1000);
-    // output(o_node,matrix);
+    printf("\n\033[31m [Total time]: \033[0m\t\t[%.3f] ms\n\n", (T_E-T_S) * 1000);
+    // printf("%.3f\n", (T_E-T_S) * 1000);
+    output(o_node,matrix);
 
 
     cudaFree(matrix_gpu);

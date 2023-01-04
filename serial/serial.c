@@ -72,12 +72,12 @@ int main(void){
     end_time = currentSeconds();
     E = clock();
     float zero=0.0;
-    // printf("\n\033[31m [execution time]: \033[0m\t\t[%.3f] ms\n\n",(end_time - start_time)* 1000);
+    printf("\n\033[31m [execution time]: \033[0m\t\t[%.3f] ms\n\n",(end_time - start_time)* 1000);
     printf("\n\033[31m [malloc time]: \033[0m\t\t[%.3f] ms\n\n", (zero) * 1000);
     printf("\n\033[31m [mem2cuda time]: \033[0m\t\t[%.3f] ms\n\n", (zero) * 1000);
     printf("\n\033[31m [execution time]: \033[0m\t\t[%.3f] ms\n\n",(end_time - start_time)* 1000);
     printf("\n\033[31m [cuda2mem time]: \033[0m\t\t[%.3f] ms\n\n", (zero) * 1000);
     printf("\n\033[31m [Total time]: \033[0m\t\t[%.3f] ms\n\n",(E-S)/CLOCKS_PER_SEC);
-    // output(node,matrix);
+    output(node,matrix);
     free(matrix);
 }
